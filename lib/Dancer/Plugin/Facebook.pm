@@ -1,7 +1,4 @@
 package Dancer::Plugin::Facebook;
-{
-  $Dancer::Plugin::Facebook::VERSION = '0.991';
-}
 # ABSTRACT: Manage Facebook interaction within Dancer applications
 
 use Dancer qw{:syntax};
@@ -9,160 +6,6 @@ use Dancer::Hook;
 use Dancer::Plugin;
 use Facebook::Graph;
 use Try::Tiny;
-
-
-my (%config, $fb, $redirect);
-
-sub _get_fb {
-    debug "Getting fb object [", $fb // "undef", "]";
-
-    # The first time out, turn our raw, local postback URL into a
-    # fully qualified one (see _do_fb_postback for more explanation).
-    if ($config{raw_postback}) {
-        my $url = delete $config{raw_postback};
-        # Place the postback url in $config for object instantiation
-        $config{postback} = uri_for ($url);
-        debug "Full postback URL is ", $config{postback};
-    }
-
-    # We use a before hook to clear a stale FB handle out, and just
-    # use ||= to regenerate as necessary here.
-    $fb ||= do {
-        my %settings = %config;
-        if (my $access_token = session->{auth}->{facebook}) {
-            $settings{access_token} = $access_token;
-        }
-        debug "Creating Facebook::Graph object with settings ", \%settings;
-        Facebook::Graph->new (%settings);
-    };
-}
-
-sub _get_fb_redirect_url () {
-    $redirect ||= do {
-        my $settings = plugin_setting;
-        debug "Settings are ", $settings;
-        my @permissions = ref $settings->{permissions} eq "ARRAY" ? @{$settings->{permissions}} : ();
-        _get_fb->authorize->extend_permissions (@permissions)->uri_as_string;
-    };
-}
-
-sub _do_fb_redirect () {
-    my $url = _get_fb_redirect_url;
-    sub {
-        debug "Redirecting to $url";
-        redirect $url, 303;
-    }
-}
-
-sub _do_fb_postback ($) {
-    my $settings = plugin_setting;
-    debug "Settings are ", $settings;
-
-    my ($url) = @_;
-
-    # We can only determine the relative URL right now, but that's
-    # enough for initializing the route.  We put the relative URL
-    # in $config{raw_postback} so that when fb is called for the
-    # first time, which will be within a route handler, we can sub
-    # in the full URL, which is what FB actually needs
-    die "You must give me the postback URL when calling fb_postback" unless ($url);
-    $config{raw_postback} = $url;
-
-    # This hook will get called when we successfully authenticate and have
-    # put the token in the session, so the application developer can
-    # retrieve it.  It doesn't need to exist if a postback route hasn't been
-    # established
-    register_hook (['fb_access_token_available']);
-
-    my $success = $settings->{landing}->{success} || "/";
-    my $failure = $settings->{landing}->{failure} || "/";
-
-    sub {
-        try {
-            my $token = _get_fb->request_access_token (params->{code});
-            session->{auth}->{facebook} = $token->token;
-            execute_hooks 'fb_access_token_available', $token->token;
-            # Go back wherever
-            redirect $success;
-        } catch {
-            redirect $failure;
-        };
-    }
-}
-
-register setup_fb => sub (;$) {
-    my ($url) = @_;
-    debug "Setting up fb access";
-
-    # We need global access to this, grab it here
-    my $settings = plugin_setting;
-    debug "Settings are ", $settings;
-
-    # Copy our registered application information over
-    if (ref $settings->{application} eq "HASH") {
-        debug "Setting application information";
-        $config{app_id} = $settings->{application}->{app_id} or die "You didn't give me an app_id for Dancer::Plugin::Facebook";
-        $config{secret} = $settings->{application}->{secret} or die "You didn't give me a secret for Dancer::Plugin::Facebook";
-    }
-
-    # Set a hook to clear out any old object unless existing tokens in
-    # the object and session match one another.  In theory, this means
-    # that absent an access token, we should never replace it.
-    debug "Setting hook to clear facebook context";
-    hook before => sub {
-        if (defined $fb) {
-            debug "Considering clearing facebook context";
-            if (defined session->{auth}->{facebook}) {
-                if ($fb->has_access_token) {
-                    if ($fb->access_token ne session->{auth}->{facebook}) {
-                        debug "Current FB access token doesn't match";
-                        undef $fb;
-                    }
-                } else {
-                    debug "Current FB doesn't have access token";
-                    undef $fb;
-                }
-            } else {
-                if ($fb->has_access_token) {
-                    debug "Current login doesn't have access token";
-                    undef $fb;
-                }
-            }
-        }
-    };
-
-    # If the user wants the automatic URL setup
-    if ($url) {
-        debug "Creating handler for ", $url;
-        get $url => _do_fb_redirect;
-
-        my $postback = "$url/postback";
-        debug "Creating handler for ", $postback;
-        get $postback => _do_fb_postback $postback;
-    }
-
-    debug "Done setting up fb access";
-};
-
-register fb => \&_get_fb;
-register fb_redirect => \&_do_fb_redirect;
-register fb_redirect_url => \&_get_fb_redirect_url;
-register fb_postback => \&_do_fb_postback;
-register_plugin;
-
-
-1;
-
-__END__
-=pod
-
-=head1 NAME
-
-Dancer::Plugin::Facebook - Manage Facebook interaction within Dancer applications
-
-=head1 VERSION
-
-version 0.991
 
 =head1 SYNOPSIS
 
@@ -210,7 +53,7 @@ are used when creating the C<Facebook::Graph> object if they're present.
 There is also a hook available (C<fb_access_token_available>) you can
 use to retrieve and store the C<access_token> for offline use when it
 is set.  Then, simply store the C<access_token> in
-C<session->{auth}->{facebook}> and the C<fb> object will automatically
+C<session->{fb_token}> and the C<fb> object will automatically
 pick it up on each request.
 
 =back
@@ -376,22 +219,154 @@ may request at the time the user authorizes your application.
 Facebook maintains L<a full list of available extended
 permissions|http://developers.facebook.com/docs/authentication/permissions>.
 
+=cut
+
+my (%config, $fb, $redirect);
+
+sub _get_fb {
+    debug "Getting fb object [", $fb // "undef", "]";
+
+    # The first time out, turn our raw, local postback URL into a
+    # fully qualified one (see _do_fb_postback for more explanation).
+    if ($config{raw_postback}) {
+        my $url = delete $config{raw_postback};
+        # Place the postback url in $config for object instantiation
+        $config{postback} = uri_for ($url);
+        debug "Full postback URL is ", $config{postback};
+    }
+
+    # We use a before hook to clear a stale FB handle out, and just
+    # use ||= to regenerate as necessary here.
+    $fb ||= do {
+        my %settings = %config;
+        if (my $access_token = session->{fb_token}) {
+            $settings{access_token} = $access_token;
+        }
+        debug "Creating Facebook::Graph object with settings ", \%settings;
+        Facebook::Graph->new (%settings);
+    };
+}
+
+sub _get_fb_redirect_url () {
+    $redirect ||= do {
+        my $settings = plugin_setting;
+        debug "Settings are ", $settings;
+        my @permissions = ref $settings->{permissions} eq "ARRAY" ? @{$settings->{permissions}} : ();
+        _get_fb->authorize->extend_permissions (@permissions)->uri_as_string;
+    };
+}
+
+sub _do_fb_redirect () {
+    sub {
+        my $url = _get_fb_redirect_url;
+        debug "Redirecting to $url";
+        redirect $url, 303;
+    }
+}
+
+sub _do_fb_postback ($) {
+    my $settings = plugin_setting;
+    debug "Settings are ", $settings;
+
+    my ($url) = @_;
+
+    # We can only determine the relative URL right now, but that's
+    # enough for initializing the route.  We put the relative URL
+    # in $config{raw_postback} so that when fb is called for the
+    # first time, which will be within a route handler, we can sub
+    # in the full URL, which is what FB actually needs
+    die "You must give me the postback URL when calling fb_postback" unless ($url);
+    $config{raw_postback} = $url;
+
+    # This hook will get called when we successfully authenticate and have
+    # put the token in the session, so the application developer can
+    # retrieve it.  It doesn't need to exist if a postback route hasn't been
+    # established
+    register_hook 'fb_access_token_available';
+
+    my $success = $settings->{landing}->{success} || "/";
+    my $failure = $settings->{landing}->{failure} || "/";
+
+    sub {
+        try {
+            my $token = _get_fb->request_access_token (params->{code});
+            session 'fb_token' => $token->token;
+            execute_hook 'fb_access_token_available', $token->token;
+            # Go back wherever
+            redirect $success;
+        } catch {
+            debug "Failed to authenticate with Facebook: $_";
+            redirect $failure;
+        };
+    }
+}
+
+register setup_fb => sub (;$) {
+    my ($url) = @_;
+    debug "Setting up fb access";
+
+    # We need global access to this, grab it here
+    my $settings = plugin_setting;
+    debug "Settings are ", $settings;
+
+    # Copy our registered application information over
+    if (ref $settings->{application} eq "HASH") {
+        debug "Setting application information";
+        $config{app_id} = $settings->{application}->{app_id} or die "You didn't give me an app_id for Dancer::Plugin::Facebook";
+        $config{secret} = $settings->{application}->{secret} or die "You didn't give me a secret for Dancer::Plugin::Facebook";
+    }
+
+    # Set a hook to clear out any old object unless existing tokens in
+    # the object and session match one another.  In theory, this means
+    # that absent an access token, we should never replace it.
+    debug "Setting hook to clear facebook context";
+    hook before => sub {
+        if (defined $fb) {
+            debug "Considering clearing facebook context";
+            if (defined session->{fb_token}) {
+                if ($fb->has_access_token) {
+                    if ($fb->access_token ne session->{fb_token}) {
+                        debug "Current FB access token doesn't match";
+                        undef $fb;
+                    }
+                } else {
+                    debug "Current FB doesn't have access token";
+                    undef $fb;
+                }
+            } else {
+                if ($fb->has_access_token) {
+                    debug "Current login doesn't have access token";
+                    undef $fb;
+                }
+            }
+        }
+    };
+
+    # If the user wants the automatic URL setup
+    if ($url) {
+        debug "Creating handler for ", $url;
+        get $url => _do_fb_redirect;
+
+        my $postback = "$url/postback";
+        debug "Creating handler for ", $postback;
+        get $postback => _do_fb_postback $postback;
+    }
+
+    debug "Done setting up fb access";
+};
+
+register fb => \&_get_fb;
+register fb_redirect => \&_do_fb_redirect;
+register fb_redirect_url => \&_get_fb_redirect_url;
+register fb_postback => \&_do_fb_postback;
+register_plugin;
+
 =head1 SEE ALSO
 
 L<Dancer>
 
 L<Facebook::Graph>
 
-=head1 AUTHOR
-
-Michael Alan Dorman <mdorman@ironicdesign.com>
-
-=head1 COPYRIGHT AND LICENSE
-
-This software is copyright (c) 2012 by Michael Alan Dorman.
-
-This is free software; you can redistribute it and/or modify it under
-the same terms as the Perl 5 programming language system itself.
-
 =cut
 
+1;
